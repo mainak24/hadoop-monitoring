@@ -2,36 +2,23 @@
 
 # http://hadoop.apache.org/docs/stable/hadoop-yarn/hadoop-yarn-site/ResourceManagerRest.html
 
-import errno, json, pycurl, sys
+import errno
+import getopt
+import json
+import pycurl
+import sys
 from io import BytesIO
-
-base_hdfs_url = 'https://hador-c1.ics.muni.cz:50470'
-base_yarn_urls = {
-    'hador-c1.ics.muni.cz': 'https://hador-c1.ics.muni.cz:8090',
-    'hador-c2.ics.muni.cz': 'https://hador-c2.ics.muni.cz:8090',
-}
-hosts = ['hador%s.ics.muni.cz' % i for i in ['-c1', '-c2'] + range(1, 25)]
-maxslots = 16
-
-# base_hdfs_url = 'https://took90.ics.muni.cz:50470'
-# base_yarn_urls = {
-#     'took90.ics.muni.cz': 'https://took90.ics.muni.cz:8090',
-#     'took98.ics.muni.cz': 'https://took98.ics.muni.cz:8090',
-# }
-# hosts = ['took%s.ics.muni.cz' % i for i in [90] + range(98, 103)]
-# maxslots = 2
-
-# base_hdfs_url = 'https://myriad12.zcu.cz:50470'
-# base_yarn_urls = {
-#     'myriad12.zcu.cz': 'https://myriad12.zcu.cz:8090',
-#     'myriad4.zcu.cz': 'https://myriad4.zcu.cz:8090',
-# }
-# hosts = ['myriad%s.zcu.cz' % i for i in [12, 4, 14, 15]]
-# maxslots = 5
 
 base_yarn_url = None
 curl = pycurl.Curl()
 debug = 4
+domain = ''
+maxslots = 1
+gss = 1
+ssl = 1
+hdfs_masters = []
+yarn_masters = []
+yarn_nodes = []
 monitoring = {}
 
 
@@ -86,8 +73,94 @@ def get_cluster_info(base_url):
     return ci
 
 
-curl.setopt(pycurl.HTTPAUTH, pycurl.HTTPAUTH_GSSNEGOTIATE)
-curl.setopt(pycurl.USERPWD, ":")
+def usage(name = sys.argv[0]):
+    print '%s [OPTIONS]\n\
+\n\
+OPTIONS are:\n\
+  -h, --help ........... help mesage\n\
+  -d, --domain ......... domain to add to all hostnames\n\
+  -g, --gss ............ enable SPNEGO authentization [1]\n\
+  -s, --ssl ............ use https URLs [1]\n\
+  -v, --verbose LEVEL .. verbosity level (0-4) [4]\n\
+  -x, --max-slots ...... maximal number of containers per node\n\
+  -m, --masters ........ list of HDFS and YARN master nodes\n\
+  -f, --hdfs-masters ... list of HDFS masters (if different from masters, only one needed)\n\
+  -y, --yarn-masters ... list of YARN masters (if different from masters)\n\
+  -n, --yarn-nodes ..... list of YARN nodes\n\
+' % name
+
+
+try:
+    opts, args = getopt.getopt(sys.argv[1:], 'hd:g:s:v:x:m:f:y:n:', [
+        'help',
+        'domain=',
+        'gss=',
+        'max-slots=',
+        'ssl=',
+        'verbose=',
+        'masters=',
+        'hdfs-masters=',
+        'yarn-masters=',
+        'yarn-nodes=',
+    ])
+except getopt.GetoptError:
+    print 'Error in arguments'
+    sys.exit(2)
+for opt, arg in opts:
+    if opt in ['-h', '--help']:
+        usage()
+        sys.exit()
+    elif opt in ['-d', '--domain']:
+        domain = arg
+    elif opt in ['-g', '--gss']:
+        gss = int(arg)
+    elif opt in ['-s', '--ssl']:
+        ssl = int(arg)
+    elif opt in ['-v', '--verbosity']:
+        debug = int(arg)
+    elif opt in ['-x', '--max-slots']:
+        maxslots = int(arg)
+    elif opt in ['-m', '--masters']:
+        yarn_masters = arg.split(r',')
+        hdfs_masters = yarn_masters
+    elif opt in ['-f', '--hdfs-masters']:
+        hdfs_masters = arg.split(r',')
+    elif opt in ['-y', '--yarn-masters']:
+        yarn_masters = arg.split(r',')
+    elif opt in ['-n', '--yarn-nodes']:
+        yarn_nodes = arg.split(r',')
+if not hdfs_masters:
+    usage()
+    print 'HDFS master not specified (-m or -f options)'
+    sys.exit(1)
+if not yarn_masters or not yarn_nodes:
+    usage()
+    print 'YARN masters or nodes not specified (-m or -y, -n options)'
+    sys.exit(1)
+
+if domain:
+    domain = '.' + domain
+hdfs_masters = [host + domain for host in hdfs_masters]
+yarn_masters = [host + domain for host in yarn_masters]
+yarn_nodes = [host + domain for host in yarn_nodes]
+if gss:
+    curl.setopt(pycurl.HTTPAUTH, pycurl.HTTPAUTH_GSSNEGOTIATE)
+    curl.setopt(pycurl.USERPWD, ":")
+if ssl:
+    base_hdfs_url = 'https://%s:50470' % hdfs_masters[0]
+    base_yarn_urls = {host: 'https://%s:8090' % host for host in yarn_masters}
+else:
+    base_hdfs_url = 'http://%s:50070' % hdfs_masters[0]
+    base_yarn_urls = ['http://%s:8088' % host for host in yarn_masters]
+for yarn_master in yarn_masters:
+    add = []
+    if yarn_master not in yarn_nodes:
+        add = add + [yarn_master]
+    yarn_nodes = add + yarn_nodes
+if debug >= 4:
+    print 'HDFS URL: %s' % base_hdfs_url
+    print 'YARN URL: %s' % ', '.join(base_yarn_urls.values())
+    print 'YARN hosts: %s' % ', '.join(yarn_nodes)
 
 # masters - High Availability status
 for host, url in base_yarn_urls.iteritems():
@@ -135,7 +208,7 @@ hdfs_underreplicatedblocks = hdfs['UnderReplicatedBlocks']
 hdfs_blocks = hdfs['BlocksTotal']
 
 # result
-for host in hosts:
+for host in yarn_nodes:
     if host in monitoring:
         usage = monitoring[host]
         print '%21s        %.1f %%' % (host, usage)
